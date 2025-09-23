@@ -1,23 +1,24 @@
 from shiny import App, ui, render
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier  # 예시
 import joblib
-from sklearn.preprocessing import StandardScaler
+from pathlib import Path
 
+# 경로 설정
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_FILE = BASE_DIR / "data" / "raw" / "train.csv"
+SCALER_FILE = BASE_DIR / "data" / "interim" / "std_scaler_v1.joblib"
+MODEL_FILE = BASE_DIR / "data" / "interim" / "rf_model_v1.joblib"
 
-# 예시 데이터프레임
-df = pd.read_csv('../Casting-Process-Data-Modeling-Project/data/raw/train.csv', encoding='utf-8')
+# 컬럼, 예시 데이터를 위한 train 데이터
+df = pd.read_csv(DATA_FILE, encoding='utf-8', low_memory=False)
 df = df[["cast_pressure", "count", "upper_mold_temp1", "low_section_speed", "lower_mold_temp2", 
          "high_section_speed", "upper_mold_temp2", "lower_mold_temp1", "biscuit_thickness", "sleeve_temperature"]]
 
-#스케일링
-std_scaler = joblib.load("../Casting-Process-Data-Modeling-Project/data/interim/std_scaler_v1.joblib")
-# 학습된 랜덤 포레스트 모델 로드 (예시)
-# rf_model = joblib.load("rf_model.pkl")
-# rf_model = RandomForestClassifier()
-# rf_model.fit(df, df['passorfail'])  # 예시 학습, 실제로는 이미 학습된 모델 사용
-rf_model = joblib.load("../Casting-Process-Data-Modeling-Project/data/interim/rf_model_v1.joblib")
+# 스케일러 불러오기
+std_scaler = joblib.load(SCALER_FILE)
+# 모델 불러오기
+rf_model = joblib.load(MODEL_FILE)
 
 def panel():
     # 메인 영역에 데이터프레임 열만큼 input 생성
