@@ -18,6 +18,10 @@ train_df.drop(19327, inplace=True)
 # 분석에서 필요없는 컬럼 제거
 train_df.drop(columns=["id", "line", "name", "mold_name", "emergency_stop", "registration_time"], inplace=True)
 
+# tryshot == "D" 행 제거
+train_df = train_df.loc[~(train_df["tryshot_signal"] == "D"), :]
+train_df.drop(columns=["tryshot_signal"], inplace=True)
+
 '''
 결측치 처리 (molten_temp)
 동일코드 앞 생산 온도, 동일 코드 뒤 생산 온도 평균
@@ -43,17 +47,25 @@ train_df.drop(columns=["molten_temp"], inplace=True)
 train_df["mold_code"] = train_df["mold_code"].astype('object')
 train_df["EMS_operation_time"] = train_df["EMS_operation_time"].astype("object")
 
-# 수치형, 범주형 컬럼 선택
-num_columns = train_df.select_dtypes(include=['number']).columns
-num_columns = num_columns.drop("passorfail")
-cat_columns = train_df.select_dtypes(include=['object']).columns
-
 # heating_furnace 결측치 처리
-train_df["heating_furnace"].fillna("c")
+train_df["heating_furnace"].fillna("c", inplace=True)
 
 # date, time dt 바꾸기
 train_df['date'] = pd.to_datetime(train_df['date'], format='%H:%M:%S')
 train_df['time'] = pd.to_datetime(train_df['time'], format='%Y-%m-%d', errors='coerce')
+
+# 시간 컬럼 만들기
+train_df["hour"] = train_df["date"].dt.hour
+train_df.drop(columns=["date"], inplace=True)
+
+# 요일 컬럼 만들기
+train_df["weekday"] = train_df["time"].dt.weekday
+train_df.drop(columns=["time"], inplace=True)
+
+# 수치형, 범주형 컬럼 선택
+num_columns = train_df.select_dtypes(include=['number']).columns
+num_columns = num_columns.drop("passorfail")
+cat_columns = train_df.select_dtypes(include=['object']).columns
 
 # 결측치 채우기 (간단히 처리)
 freq_impute = SimpleImputer(strategy='most_frequent')
@@ -81,4 +93,9 @@ rf = RandomForestClassifier(oob_score=True)
 
 rf.fit(X_train, y_train)
 
-rf.feature_importances_
+result = pd.DataFrame({
+    "columns" : train_df_all.columns,
+    "importances" : rf.feature_importances_
+})
+
+result.sort_values("importances", ascending=False).head(10)
