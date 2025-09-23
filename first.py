@@ -75,9 +75,9 @@ plt.show()
 df[df['mold_code']==8573]
 
 
-####################################################################################
+########################################################################################
 # date ( time과 다르게 시간 분 초)
-####################################################################################
+########################################################################################
 
 # object > time 데이터 타입 변경
 df['date'].dtypes
@@ -102,17 +102,15 @@ plt.ylabel("생산량")
 plt.xticks(rotation=0)
 plt.show()
 
-
-
-####################################################################################
+########################################################################################
 # count
-####################################################################################
+########################################################################################
 
 # 결측치 확인
 df['count'].isnull().sum()
 df_8412 = df[df['mold_code']==8412].reset_index()
 df_8412[['time','date','count']].head(30)
-
+da
 # 날짜별 count 최대값
 # count가 초기화되는 기준이 다름
 # 위에서 id로 count()함수 사용해서 하루 생산량 구한 거랑 일별 count의 max값이 다르기 떄문
@@ -296,3 +294,54 @@ plt.xticks(rotation=0)
 plt.show()
 df
 df['mold_name'].value_counts()
+
+
+###############################################################
+train_df = df.copy()
+# 일자(time), 제품(mold_code)별 count 중복 횟수 확인
+dup_stats = (
+    train_df
+    .groupby(['time','mold_code'])['count']
+    .value_counts()   # count별 등장 횟수
+    .reset_index(name='dup_freq')  # 컬럼 이름 정리
+    .sort_values(['dup_freq'], ascending=False)  # 중복 많은 순 정렬
+)
+train_df.groupby('time')['count'].value_counts()
+
+
+train_df[train_df['mold_code']==8412]['count']
+train_df[train_df['mold_code']==8573]['count']
+train_df[train_df['mold_code']==8412]['count']
+train_df[train_df['mold_code']==8412]['count']
+df.info()
+train_df['mold_code'].unique()
+
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+mold_codes = [8722, 8412, 8573, 8917, 8600]
+bin_size = 50  # 구간 단위
+
+plt.figure(figsize=(12,8))
+
+for code in mold_codes:
+    df_sub = train_df[train_df['mold_code'] == code].copy()
+    df_sub['count_bin'] = (df_sub['count'] // bin_size) * bin_size
+    
+    defect_stats = (
+        df_sub.groupby('count_bin')
+        .agg(total=('count', 'size'),
+             defects=('passorfail', 'sum'))
+    )
+    defect_stats['defect_rate'] = defect_stats['defects'] / defect_stats['total']
+    
+    plt.plot(defect_stats.index, defect_stats['defect_rate'], marker='o', label=f"mold_code {code}")
+
+plt.xlabel("Count 구간 시작")
+plt.ylabel("불량률")
+plt.title("Mold_code별 구간별 불량률")
+plt.legend()
+plt.grid(True)
+plt.show()
