@@ -1,7 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-df = pd.read_csv("./data/raw/train.csv")
+df = pd.read_csv("../../data/raw/train.csv")
 df.info()
 df["mold_name"].unique()
 
@@ -127,7 +127,7 @@ target.nunique()
 target.value_counts().head(20)
 
 plt.figure(figsize=(10,5))
-plt.hist(target, bins=30, edgecolor='k')
+plt.hist(target[target<2500], bins=30, edgecolor='k')
 plt.title(f"Distribution of {target.name}")
 plt.xlabel(target.name)
 plt.ylabel("Frequency")

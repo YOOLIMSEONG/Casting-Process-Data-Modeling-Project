@@ -80,3 +80,5 @@ y_train = train_df["passorfail"]
 rf = RandomForestClassifier(oob_score=True)
 
 rf.fit(X_train, y_train)
+
+rf.feature_importances_
