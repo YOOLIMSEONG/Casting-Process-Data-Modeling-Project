@@ -4,6 +4,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
+import joblib
 
 train_df = pd.read_csv("../../data/raw/train.csv")
 test_df = pd.read_csv("../../data/raw/test.csv")
@@ -63,8 +64,8 @@ train_df["weekday"] = train_df["time"].dt.weekday
 train_df.drop(columns=["time"], inplace=True)
 
 # 수치형, 범주형 컬럼 선택
-num_columns = train_df.select_dtypes(include=['number']).columns
-num_columns = num_columns.drop("passorfail")
+num_columns = train_df[["cast_pressure", "count", "upper_mold_temp1", "low_section_speed", "lower_mold_temp2", 
+                       "high_section_speed", "upper_mold_temp2", "lower_mold_temp1", "biscuit_thickness", "sleeve_temperature"]].columns
 cat_columns = train_df.select_dtypes(include=['object']).columns
 
 # 결측치 채우기 (간단히 처리)
@@ -86,16 +87,18 @@ train_df_all = pd.concat([train_df_cat,
                           train_df_num], axis = 1)
 
 # X, y 설정
-X_train = train_df_all
+X_train = train_df_all[["cast_pressure", "count", "upper_mold_temp1", "low_section_speed", "lower_mold_temp2", 
+                       "high_section_speed", "upper_mold_temp2", "lower_mold_temp1", "biscuit_thickness", "sleeve_temperature"]]
 y_train = train_df["passorfail"]
 
 rf = RandomForestClassifier(oob_score=True)
 
 rf.fit(X_train, y_train)
 
-result = pd.DataFrame({
-    "columns" : train_df_all.columns,
-    "importances" : rf.feature_importances_
-})
+test_X = X_train.head(1)
+test_X["cast_pressure"] = "1.5"
 
-result.sort_values("importances", ascending=False).head(10)
+pred = rf.predict(test_X)[0]
+
+joblib.dump(rf, "../../data/interim/rf_model_v1.joblib")
+joblib.dump(std_scaler, "../../data/interim/std_scaler_v1.joblib")

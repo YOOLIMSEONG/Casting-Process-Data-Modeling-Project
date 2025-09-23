@@ -67,3 +67,4 @@ sns.histplot(data=train_df.loc[(train_df["Coolant_temperature"] < 150) & (train_
 # 코드별 설비 작동 사이클 시간
 sns.histplot(data=train_df.loc[(train_df["facility_operation_cycleTime"]<150) & (train_df["facility_operation_cycleTime"]>80), :], x='facility_operation_cycleTime', hue='mold_code', palette=custom_colors, kde=True)
 
+
