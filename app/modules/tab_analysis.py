@@ -12,12 +12,12 @@ df = df[["cast_pressure", "count", "upper_mold_temp1", "low_section_speed", "low
          "high_section_speed", "upper_mold_temp2", "lower_mold_temp1", "biscuit_thickness", "sleeve_temperature"]]
 
 #스케일링
-std_scaler = joblib.load("../Casting-Process-Data-Modeling-Project/data/raw/std_scaler_v1.joblib")
+std_scaler = joblib.load("../Casting-Process-Data-Modeling-Project/data/interim/std_scaler_v1.joblib")
 # 학습된 랜덤 포레스트 모델 로드 (예시)
 # rf_model = joblib.load("rf_model.pkl")
 # rf_model = RandomForestClassifier()
 # rf_model.fit(df, df['passorfail'])  # 예시 학습, 실제로는 이미 학습된 모델 사용
-rf_model = joblib.load("../Casting-Process-Data-Modeling-Project/data/raw/rf_model_v1.joblib")
+rf_model = joblib.load("../Casting-Process-Data-Modeling-Project/data/interim/rf_model_v1.joblib")
 
 def panel():
     # 메인 영역에 데이터프레임 열만큼 input 생성
