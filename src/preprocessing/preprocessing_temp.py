@@ -102,3 +102,5 @@ pred = rf.predict(test_X)[0]
 
 joblib.dump(rf, "../../data/interim/rf_model_v1.joblib")
 joblib.dump(std_scaler, "../../data/interim/std_scaler_v1.joblib")
+
+train_df.groupby(['tryshot_signal', 'passorfail'])['mold_code'].count()

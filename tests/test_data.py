@@ -1,7 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-df = pd.read_csv("../../data/raw/train.csv")
+df = pd.read_csv("../data/raw/train.csv")
 df.info()
 df["mold_name"].unique()
 
