@@ -7,6 +7,7 @@ from pathlib import Path
 # 경로 설정
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_FILE = BASE_DIR / "data" / "raw" / "train.csv"
+OUTPUT_FILE = BASE_DIR / "data" / "processed" / "train_v1.csv"
 
 # 데이터 로드
 train_df = pd.read_csv(DATA_FILE)
@@ -151,3 +152,5 @@ train_df.drop(42632,inplace=True)
 # ==================================================================================================
 train_df = train_df[~(train_df["tryshot_signal"] == 'D')]
 train_df.drop(columns=["tryshot_signal"], inplace=True)
+
+train_df.to_csv(OUTPUT_FILE)
