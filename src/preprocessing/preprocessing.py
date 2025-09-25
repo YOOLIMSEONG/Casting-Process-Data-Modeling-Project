@@ -2,161 +2,152 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+from pathlib import Path
 
-train_df = pd.read_csv("../../data/raw/train.csv")
+# 경로 설정
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_FILE = BASE_DIR / "data" / "raw" / "train.csv"
 
-test_df = pd.read_csv("../../data/raw/test.csv")
+# 데이터 로드
+train_df = pd.read_csv(DATA_FILE)
 
+# 데이터 정보
 train_df.info()
-train_df.head()
+train_df.columns
 train_df.isna().sum()
 
-# 대부분이 결측치인 행 제거
+# ==================================================================================================
+# date, time 컬럼명 swap 및 타입 변환
+# ==================================================================================================
+train_df = train_df.rename(columns={'date': '__tmp_swap__'})
+train_df = train_df.rename(columns={'time': 'date', '__tmp_swap__': 'time'})
+
+train_df["date"] = pd.to_datetime(train_df["date"], format="%Y-%m-%d")
+train_df["time"] = pd.to_datetime(train_df["time"], format="%H:%M:%S")
+
+
+# ==================================================================================================
+# 대부분이 결측치인 행 확인 및 제거
+# 해당 행이 유일한 emergency_stop 결측행이여서 이 행이 긴급중단을 나타내는 행이라고 판단
+# 모델 예측 끝난 후에 ‘emergency_stop’이 결측인 경우 무조건 불량이라고 판정 내도록 만들기
+# ==================================================================================================
+train_df.iloc[19327, :]
+mold_code_19327 = train_df.loc[19327, "mold_code"]
+time_19327 = train_df.loc[19327, "time"]
+train_df.loc[(train_df["mold_code"] == mold_code_19327) & (train_df["time"] == time_19327) & (train_df["id"] > 19273), :]
 train_df.drop(19327, inplace=True)
 
-# 분석에서 필요없는 컬럼 제거
-train_df.drop(columns=["id", "line", "name", "mold_name", "emergency_stop", "registration_time"], inplace=True)
+# ==================================================================================================
+# 단일값 컬럼 및 불필요한 컬럼 제거
+# ==================================================================================================
+# ID 컬럼 제거
+train_df.drop(columns=["id"], inplace=True)
+# 단일값 컬럼 제거
+train_df["line"].unique()
+train_df["name"].unique()
+train_df["mold_name"].unique()
+train_df.drop(columns=["line", "name", "mold_name"])
+# nan값이 한개의 행인 emergency_stop 컬럼 제거 
+train_df.drop(columns=["emergency_stop"], inplace=True)
+# 중복 컬럼 제거
+train_df.drop(columns=["registration_time"], inplace=True)
 
-'''
-결측치 처리 (molten_temp)
-동일코드 앞 생산 온도, 동일 코드 뒤 생산 온도 평균
-'''
-# 🔹 원본 molten_temp를 새로운 열로 복사
+# ==================================================================================================
+# 데이터가 겹치는 행 제거
+# mold_code가 같으면서 count가 연속적으로 같은 행 제거
+# ==================================================================================================
+# mold_code별로 데이터 프레임 나누기
+mold_codes = train_df["mold_code"].unique()
+df_8722 = train_df[train_df["mold_code"] == 8722].copy()
+df_8412 = train_df[train_df["mold_code"] == 8412].copy()
+df_8573 = train_df[train_df["mold_code"] == 8573].copy()
+df_8917 = train_df[train_df["mold_code"] == 8917].copy()
+df_8600 = train_df[train_df["mold_code"] == 8600].copy()
+
+# 연속된 count 행 제거 함수
+def remove_consecutive_counts(df):
+    prev_count = 0
+    index_list = []
+
+    for idx, row in df.iterrows():
+        if row["count"] == prev_count:
+            index_list.append(idx)
+        prev_count = row["count"]
+
+    df.drop(index=index_list, inplace=True)
+    return df
+
+df_8722 = remove_consecutive_counts(df_8722)
+df_8412 = remove_consecutive_counts(df_8412)
+df_8573 = remove_consecutive_counts(df_8573)
+df_8917 = remove_consecutive_counts(df_8917)
+df_8600 = remove_consecutive_counts(df_8600)
+
+# 나눈 데이터 프레임 병합
+train_df = pd.concat([df_8722, df_8412, df_8573, df_8917, df_8600])
+# 인덱스 정렬
+train_df = train_df.sort_index()
+
+
+# ==================================================================================================
+# 결측치 처리 (molten_temp)
+# 처리 방법 : 동일코드 앞 생산 온도, 동일 코드 뒤 생산 온도 평균
+# ==================================================================================================
+# 원본 molten_temp를 새로운 열로 복사
 train_df['molten_temp_filled'] = train_df['molten_temp']
 
-# 🔹 금형별 시간 순 정렬 후 선형 보간
+# 코드별 시간 순 정렬 후 선형 보간
 train_df['molten_temp_filled'] = (
     train_df.groupby('mold_code')['molten_temp_filled'].transform(lambda x: x.interpolate(method='linear'))
 )
 
-# 🔹 여전히 남아있는 결측치(맨 앞/뒤)는 그룹별 중앙값으로 채우기
+# 여전히 남아있는 결측치(맨 앞/뒤)는 그룹별 중앙값으로 채우기
 train_df['molten_temp_filled'] = (
     train_df.groupby('mold_code')['molten_temp_filled'].transform(lambda x: x.fillna(x.median()))
 )
-train_df[['molten_temp', 'molten_temp_filled']]
-train_df['molten_temp'].isna().sum()
-train_df['molten_temp_filled'].isna().sum()
+
+# 채워진 컬럼으로 교체
 train_df.drop(columns=["molten_temp"], inplace=True)
-
-'''
-결측치 처리 (molten_volume)
-'''
-train_df.loc[train_df["molten_volume"].isna(), :]
-
-custom_colors = {
-    8412 : '#2ca02c',
-    8573 : '#ff7f0e',
-    8600 : "#ff0e0e",
-    8722 : "#ffd70e",
-    8917 : '#2ca02c'
-}
-
-# 코드별 전자교반 시간
-train_df.groupby(["mold_code", "EMS_operation_time"])["passorfail"].count()
-
-# 코드별 형체력 
-sns.histplot(data=train_df.loc[(train_df["physical_strength"]<10000) & (train_df["physical_strength"]>600), :], x='physical_strength', hue='mold_code', kde=True)
-
-# 코드별 주조 압력
-sns.histplot(data=train_df.loc[train_df["cast_pressure"]>300, :], x='cast_pressure', hue='mold_code', kde=True)
-sns.histplot(data=train_df.loc[(train_df["cast_pressure"]>300) & train_df["mold_code"].isin([8573, 8600, 8722]), :], x='cast_pressure', hue='mold_code', kde=True)
-
-# 코드별 냉각수 온도
-sns.histplot(data=train_df.loc[train_df["Coolant_temperature"] < 150, :], x='Coolant_temperature', hue='mold_code', palette=custom_colors, kde=True)
-sns.histplot(data=train_df.loc[(train_df["Coolant_temperature"] < 150) & (train_df["mold_code"]).isin([8573, 8600, 8722]), :], x='Coolant_temperature', hue='mold_code', kde=True)
-
-# 코드별 설비 작동 사이클 시간
-sns.histplot(data=train_df.loc[(train_df["facility_operation_cycleTime"]<150) & (train_df["facility_operation_cycleTime"]>80), :], x='facility_operation_cycleTime', hue='mold_code', palette=custom_colors, kde=True)
-
-
-
-
+train_df = train_df.rename(columns={'molten_temp_filled': 'molten_temp'})
 
 # ==================================================================================================
-# mold_code별 molten_volume 결측치 개수 확인
+# 컬럼 제거 (upper_mold_temp3)
+# 결측치 총 312개, 이상치(1449.0) 64356개로 정보값 매우 왜곡
+# upper_mold_temp3가 결측일 때 mold_code_8412, lower_mold_temp3, molten_volume도 결측
+# 이상치가 1449.0으로 고정이라서 센서가 고장났을 경우 1449라는 코드를 내보내는 것으로 가정하고 upper_mold_temp3 열을 제거하기로 함
 # ==================================================================================================
-# 전체 개수 (결측 포함)
-total = train_df.groupby('mold_code').size()
-
-# 결측치 제외한 개수
-non_null = train_df.groupby('mold_code')['molten_volume'].count()
-
-# 결측치 개수 = 전체 - 결측 아닌 값
-missing = total - non_null
-
-# 하나의 데이터프레임으로 합치기
-missing_df = pd.DataFrame({
-    'total_rows': total,
-    'non_null': non_null,
-    'missing': missing
-})
-
-print(missing_df)
-
-
-
-
-
-# ===========================================================================================
-# mold_code별 molten_volume과 count의 관계 확인
-# ===========================================================================================
-# 보고 싶은 컬럼만 선택
-train_df = train_df[~(train_df['tryshot_signal']=="D")] # tryshot_signal이 결측치인 경우(정상동작)이 아닌 경우만 고름
-train_df['tryshot_signal'].value_counts() # 시험생산인 경우 확인: 1244개 -> 0개
-df_selected = train_df[['time','date','count','molten_volume','mold_code','sleeve_temperature','passorfail']].copy()
-df_selected.dropna(subset=['molten_volume'], inplace=True) # molten_volume이 결측치인 경우 제외함
-df_selected = df_selected[df_selected['molten_volume']<2000] # 이 중 molten_volume이 2000 미만인 경우만 고름
-
-# mold_code별로 그래프 그리기
-mold_codes = df_selected['mold_code'].unique()
-
-plt.figure(figsize=(15, 10))
-for i, mold in enumerate(mold_codes, 1):
-    plt.subplot(len(mold_codes), 1, i)
-    mold_df = df_selected [df_selected['mold_code'] == mold].head(300)
-    sns.scatterplot(data=mold_df, x='count', y='molten_volume', hue='passorfail', palette='Set1', alpha=0.6)
-    plt.title(f'Mold Code: {mold}')
-    plt.xlabel('Count')
-    plt.ylabel('Molten Volume')
-
-plt.tight_layout()
-plt.show()
-
-# molten을 한 번 채운 뒤 쭉 사용하다가 일정 수준 이하로 떨어지면 다시 채워넣음
-
-
-
-
+train_df.drop(columns=["upper_mold_temp3"], inplace=True)
 
 # ==================================================================================================
-# mold_code별 Sleeve temperature와 count의 관계 확인
+# 컬럼 제거 (lower_mold_temp3)
+# 이상치(1449.0) 71651개, 결측치 312개로 upper_mold_temp3와 마찬가지로 제거하기로 함
 # ==================================================================================================
-# mold_code별로 그래프 그리기
-mold_codes = df_selected['mold_code'].unique()
-
-plt.figure(figsize=(15, 10))
-
-for i, mold in enumerate(mold_codes, 1):
-    plt.subplot(len(mold_codes), 1, i)
-    mold_df = df_selected [df_selected ['mold_code'] == mold].head(300)
-    sns.scatterplot(data=mold_df, x='count', y='sleeve_temperature', hue='passorfail', palette='Set1', alpha=0.6)
-    plt.title(f'Mold Code: {mold}')
-    plt.xlabel('Count')
-    plt.ylabel('Sleeve Temperature')
-
-plt.tight_layout()
-plt.show()
-
-
-
-
+train_df.drop(columns=["lower_mold_temp3"], inplace=True)
 
 # ==================================================================================================
-# heating_furnace 열을 버리는 이유
-# (1) NaN이 2개 이상의 그룹으로 나뉨
-# (2) molten_volume을 한 번 채울 때마다 count가 새로 시작되는데, 그때마다 furnace를 바꾸지 않는다고 확신할 수 없음
+# 컬럼 제거 (heating_furnace)
+# 결측치 총 40880개 (mold_code 8600은 전부 다 결측치(2960개), 8722도 전부 다 결측치(19664개))
+# 일단은 제외 (3개 이상의 종류이지만 구분이 어려움, 결과에 큰 영향을 미치지 않을 것이라 판단)
 # ==================================================================================================
-train_df = pd.read_csv("../../data/raw/train.csv")
-pd.set_option('display.max_rows', None)
-train_df.loc[~(train_df['heating_furnace'].isna())][['mold_code', 'heating_furnace']].tail(70)
-train_df.loc[73406:73450, ['heating_furnace', 'mold_code', 'time', 'date', 'molten_volume', 'count']]
+train_df.drop(columns=["heating_furnace"], inplace=True)
+
+# ==================================================================================================
+# 컬럼 제거 (molten_volume)
+# ==================================================================================================
+train_df.drop(columns=["molten_volume"], inplace=True)
+
+# ==================================================================================================
+# 이상치 제거 (upper_mold_temp2)
+# ==================================================================================================
+train_df['upper_mold_temp2'].hist()
+train_df['upper_mold_temp2'].describe()
+train_df[train_df['upper_mold_temp2']==4232]
+train_df.drop(42632,inplace=True)
+
+# ==================================================================================================
+# 행 & 열 제거 (tryshot_signal)
+# 시범 운행이기 때문에 불량율 100퍼센트 -> 학습에 필요없는 데이터로 판단
+# 모델 예측 끝난 후에 ‘tryshot_signal’이 D인 경우 무조건 불량이라고 판정 내도록 만들기
+# ==================================================================================================
+train_df = train_df[~(train_df["tryshot_signal"] == 'D')]
+train_df.drop(columns=["tryshot_signal"], inplace=True)
