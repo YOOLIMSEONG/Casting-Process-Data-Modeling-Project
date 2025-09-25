@@ -83,7 +83,7 @@ sns.histplot(data=train_df.loc[(train_df["facility_operation_cycleTime"]<150) & 
 train_df['molten_volume'].hist()
 
 train_df[train_df['molten_volume']>2000]['mold_code'].value_counts() # 99퍼센트가 8412
-train_8412['molten_volume'].hist()
+
 # molten_volume > 2000 & mold_code != 8412
 df_other_molds = train_df[(train_df['molten_volume'] > 2000) & (train_df['mold_code'] != 8412)].copy()
 
@@ -114,8 +114,6 @@ df_selected.dropna(subset=['molten_volume'], inplace=True)
 df_selected = df_selected[df_selected['molten_volume']<2000]
 
 df_selected_8412 = df_selected[df_selected['mold_code']==8412].reset_index(drop=True)
-
-df_selected
 
 # 예시: 데이터 불러오기
 # df = pd.read_csv("train.csv")  
@@ -196,12 +194,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import spearmanr
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.stats import spearmanr
-
-
-
 # 8412 데이터 선택
 df_8412 = train_df[train_df['mold_code'] == 8412].copy()
 df_8412 = df_8412[df_8412['molten_volume']>2000]
@@ -232,8 +224,6 @@ for group in df_8412['mold_group'].unique():
         
         plt.tight_layout()
         plt.show()
-
-
 
 
 
