@@ -102,7 +102,7 @@ print(missing_df)
 # 보고 싶은 컬럼만 선택
 train_df = train_df[~(train_df['tryshot_signal']=="D")] # tryshot_signal이 결측치인 경우(정상동작)이 아닌 경우만 고름
 train_df['tryshot_signal'].value_counts() # 시험생산인 경우 확인: 1244개 -> 0개
-df_selected = train_df[['time','date','count','molten_volume','mold_code','sleeve_temperature','passorfail']].copy()
+df_selected = train_df[['time','date','count','molten_volume','mold_code','sleeve_temperature','lower_mold_temp2','passorfail']].copy()
 df_selected.dropna(subset=['molten_volume'], inplace=True) # molten_volume이 결측치인 경우 제외함
 df_selected = df_selected[df_selected['molten_volume']<2000] # 이 중 molten_volume이 2000 미만인 경우만 고름
 
@@ -146,6 +146,25 @@ for i, mold in enumerate(mold_codes, 1):
 plt.tight_layout()
 plt.show()
 
+# ==================================================================================================
+# mold_code별 lower_mold_temp2와 count의 관계 확인
+# ==================================================================================================
+# mold_code별로 그래프 그리기
+
+mold_codes = df_selected['mold_code'].unique()
+
+plt.figure(figsize=(15, 10))
+
+for i, mold in enumerate(mold_codes, 1):
+    plt.subplot(len(mold_codes), 1, i)
+    mold_df = df_selected [df_selected ['mold_code'] == mold].head(300)
+    sns.scatterplot(data=mold_df, x='count', y='lower_mold_temp2', hue='passorfail', palette='Set1', alpha=0.6)
+    plt.title(f'Mold Code: {mold}')
+    plt.xlabel('Count')
+    plt.ylabel('lower_mold_temp2')
+
+plt.tight_layout()
+plt.show()
 
 
 
