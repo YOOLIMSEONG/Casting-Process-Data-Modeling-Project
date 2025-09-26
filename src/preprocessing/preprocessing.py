@@ -3,19 +3,25 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from pathlib import Path
+from sklearn.model_selection import train_test_split
 
 # 경로 설정
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_FILE = BASE_DIR / "data" / "raw" / "train.csv"
-OUTPUT_FILE = BASE_DIR / "data" / "processed" / "train_v1.csv"
+OUTPUT_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v1.csv"
+OUTPUT_FILE_TEST = BASE_DIR / "data" / "processed" / "test_v1.csv"
+
 
 # 데이터 로드
-train_df = pd.read_csv(DATA_FILE)
+df = pd.read_csv(DATA_FILE)
 
 # 데이터 정보
-train_df.info()
-train_df.columns
-train_df.isna().sum()
+df.info()
+df.columns
+df.isna().sum()
+
+# 데이터 
+train_df, test_df = train_test_split(df, test_size=0.2, stratify=df["passorfail"], random_state=42)
 
 # ==================================================================================================
 # date, time 컬럼명 swap 및 타입 변환
@@ -153,4 +159,5 @@ train_df.drop(42632,inplace=True)
 train_df = train_df[~(train_df["tryshot_signal"] == 'D')]
 train_df.drop(columns=["tryshot_signal"], inplace=True)
 
-train_df.to_csv(OUTPUT_FILE)
+train_df.to_csv(OUTPUT_FILE_TRAIN)
+test_df.to_csv(OUTPUT_FILE_TEST)
