@@ -3,12 +3,14 @@ import pandas as pd
 import numpy as np
 import joblib
 from pathlib import Path
+import base64
 
 # --- 경로 설정 ---
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_FILE = BASE_DIR / "data" / "raw" / "train.csv"
 SCALER_FILE = BASE_DIR / "data" / "interim" / "std_scaler_v1.joblib"
 MODEL_FILE = BASE_DIR / "data" / "interim" / "rf_model_v1.joblib"
+PDP_IMAGE_FILE = BASE_DIR / "data" / "shinypng" / "RF_basic_PDP.png"
 
 # --- 데이터 로드 ---
 df = pd.read_csv(DATA_FILE, encoding="utf-8", low_memory=False)
@@ -30,6 +32,17 @@ df = df[
 # --- 스케일러/모델 로드 ---
 std_scaler = joblib.load(SCALER_FILE)
 rf_model = joblib.load(MODEL_FILE)
+
+# --- PDP 이미지를 base64로 인코딩 ---
+def load_pdp_image():
+    try:
+        with open(PDP_IMAGE_FILE, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode()
+            return f"data:image/png;base64,{encoded_string}"
+    except FileNotFoundError:
+        return None
+
+pdp_image_data = load_pdp_image()
 
 # --- 슬라이더 메타(최솟값~최댓값) ---
 slider_meta = {}
@@ -58,6 +71,12 @@ def panel():
             )
         )
 
+    # 슬라이더를 2행 5열로 배치하기 위한 그룹핑
+    slider_groups = [
+        main_inputs[:5],   # 첫 번째 행 (5개)
+        main_inputs[5:]    # 두 번째 행 (5개)
+    ]
+
     return ui.nav_panel(
         "개별 예측",
         ui.page_sidebar(
@@ -66,7 +85,25 @@ def panel():
                 ui.input_action_button("predict", "예측 실행"),
                 ui.card(ui.output_text("prediction_result")),
             ),
-            ui.layout_column_wrap(*main_inputs),
+            ui.div(
+                # 첫 번째 행 슬라이더
+                ui.div(
+                    ui.layout_columns(*slider_groups[0], col_widths=[2, 2, 2, 2, 2]),
+                    style="margin-bottom: 20px;"
+                ),
+                # 두 번째 행 슬라이더
+                ui.div(
+                    ui.layout_columns(*slider_groups[1], col_widths=[2, 2, 2, 2, 2]),
+                    style="margin-bottom: 30px;"
+                ),
+                # PDP 이미지 영역
+                ui.card(
+                    ui.div(
+                        ui.output_ui("pdp_image_display")
+                    ),
+                    full_screen=True
+                )
+            )
         ),
     )
 
@@ -76,9 +113,9 @@ def server(input, output, session):
 
     # 버튼 클릭시에만 예측 수행
     @reactive.effect
-    @reactive.event(input.predict)   # <-- predict 버튼이 '이벤트 트리거'
+    @reactive.event(input.predict)
     def _run_prediction():
-        # 현재 슬라이더 값 읽기 (이 안에선 자동으로 isolate 되어 버튼에만 반응)
+        # 현재 슬라이더 값 읽기
         input_row = {col: float(getattr(input, col)()) for col in df.columns}
         input_df = pd.DataFrame([input_row], columns=df.columns)
 
@@ -93,7 +130,22 @@ def server(input, output, session):
     @output
     @render.text
     def prediction_result():
-        # 항상 현재의 result_text만 표시 (버튼 누르기 전엔 안내 문구)
         return result_text.get()
+
+    @output
+    @render.ui
+    def pdp_image_display():
+        if pdp_image_data is not None:
+            return ui.div(
+                ui.img(
+                    src=pdp_image_data,
+                    style="width: 80%; height: auto; max-width: 800px; display: block; margin: 0 auto; margin-top: -10px;"
+                )
+            )
+        else:
+            return ui.div(
+                ui.p("PDP 이미지를 찾을 수 없습니다.", 
+                     style="text-align: center; color: #666; margin: 50px;")
+            )
 
 app = App(panel, server)
