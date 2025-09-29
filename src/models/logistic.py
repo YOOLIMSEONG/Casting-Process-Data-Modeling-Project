@@ -1,112 +1,131 @@
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import optuna
+import warnings
+warnings.filterwarnings("ignore")
 
+# scikit-learn
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.pipeline import Pipeline as SkPipeline
 from sklearn.linear_model import LogisticRegression
-
 from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    f1_score,
-    recall_score,
-    classification_report,
-    confusion_matrix,
-    roc_curve,
-    precision_recall_curve,
+    roc_auc_score, average_precision_score, f1_score, recall_score,
+    classification_report, confusion_matrix, roc_curve, precision_recall_curve
 )
-# 병렬/스레드 과다 사용 제어(BLAS/OpenMP)
+import matplotlib.pyplot as plt
+
+# imbalanced-learn (SMOTE/SMOTENC + imblearn Pipeline)
+from imblearn.over_sampling import SMOTE, SMOTENC
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+# Optuna
+import optuna
+
+# parallel / thread control
 from joblib import parallel_backend
 from threadpoolctl import threadpool_limits
-
 
 # ---------------------------
 # 파일 경로 설정
 # ---------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
-DATA_FILE = BASE_DIR / "data" / "processed" / "train_v1.csv"
+DATA_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v1.csv"
+DATA_FILE_TEST = BASE_DIR / "data" / "processed" / "test_v1.csv"
+
 
 # ---------------------------
 # 데이터 로드
 # ---------------------------
-df = pd.read_csv(DATA_FILE)
-# date/time 컬럼은 모델 학습에 사용하지 않는다고 판단되어 제거
-df.drop(columns=["date", "time"], inplace=True)
+train_df = pd.read_csv(DATA_FILE_TRAIN)
+test_df = pd.read_csv(DATA_FILE_TEST)
+train_df.drop(columns=["date", "time"], inplace=True)
 
 # ---------------------------
-# X, y 선택
+# 타깃 처리
 # ---------------------------
 target_col = "passorfail"
-X = df.drop(columns=[target_col])
-y = df[target_col].copy().astype(int)
+
+y_train = train_df[target_col].copy().astype(int)
+X_train = train_df.drop(columns=[target_col])
+
+y_test = test_df[target_col].copy().astype(int)
+X_test = test_df[train_df.columns]
+
+# 숫자/범주형 컬럼
+numeric_cols = X_train.select_dtypes(include=["number"]).columns.tolist()
+categorical_cols = X_train.select_dtypes(exclude=["number"]).columns.tolist()
+
 
 # ---------------------------
-# 수치형, 범주형 컬럼 분리
+# Preprocessing 구성
 # ---------------------------
-numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
-categorical_cols = X.select_dtypes(exclude=["number"]).columns.tolist()
 
-# ---------------------------
-# train/test 분할
-# ---------------------------
-# stratify=y : 불량 양품 비율 유지
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=42
+num_pipe_for_smote = SkPipeline([("scaler", StandardScaler())])
+cat_pipe_for_smote = SkPipeline([("ord", OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))])
+
+preprocessor_for_smote = ColumnTransformer(
+    transformers=[
+        ("num", num_pipe_for_smote, numeric_cols),
+        ("cat", cat_pipe_for_smote, categorical_cols),
+    ],
+    remainder="drop"
 )
 
-# ---------------------------
-# 전처리 파이프라인
-# ---------------------------
-num_pipe = Pipeline([("scaler", StandardScaler())])
-cat_pipe = Pipeline([("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False))])
 
-transformers = []
-transformers.append(("num", num_pipe, numeric_cols))
-transformers.append(("cat", cat_pipe, categorical_cols))
+n_num = len(numeric_cols)
+n_cat = len(categorical_cols)
+cat_indices_for_smotenc = list(range(n_num, n_num + n_cat)) if n_cat > 0 else []
 
-preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
+# 3) Post-SMOTE processing: OneHotEncoder for categorical columns, passthrough numeric
+# We will use ColumnTransformer that expects the SMOTEd numpy array layout above.
+# For numeric: passthrough (they are already scaled)
+# For categorical: OneHotEncoder
+from sklearn.compose import ColumnTransformer as CT_after_smote
+
+if n_cat > 0:
+    post_smote_transformer = CT_after_smote(
+        transformers=[
+            ("num_passthrough", "passthrough", list(range(0, n_num))),
+            ("cat_ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_indices_for_smotenc),
+        ],
+        remainder="drop"
+    )
+else:
+    # 카테고리가 없으면 숫자만 passthrough
+    post_smote_transformer = CT_after_smote(
+        transformers=[("num_passthrough", "passthrough", list(range(0, n_num)))],
+        remainder="drop"
+    )
 
 # ---------------------------
-# Optuna objective
+# Optuna objective (SMOTENC 포함)
 # ---------------------------
 def objective(trial):
-    solver = trial.suggest_categorical("solver", ["saga", "liblinear", "lbfgs"])
-    
-    # penalty는 규제 유형: l1(lasso), l2(ridge), elasticnet(혼합)
+    """
+    Optuna objective: trial로부터 하이퍼파라미터를 얻어 imblearn 파이프라인을 만들어
+    cross_validate로 average_precision(=PR AUC)을 교차검증하여 반환합니다.
+    """
+    # ---------- 모델 하이퍼파라미터 ----------
+    solver = trial.suggest_categorical("solver", ["liblinear", "saga", "lbfgs"])
     penalty = trial.suggest_categorical("penalty", ["l1", "l2", "elasticnet"])
-    
-    # C는 규제 강도 역수(작을수록 강한 규제)
     C = trial.suggest_loguniform("C", 1e-4, 1e2)
-    
-    # elasticnet에서 사용하는 l1_ratio (l1과 l2의 혼합 비율)
     l1_ratio = trial.suggest_float("l1_ratio", 0.05, 0.95)
-    
-    # 클래스 불균형을 고려한 가중치 사용 여부
     use_balanced = trial.suggest_categorical("class_weight_balanced", [True, False])
     class_weight = "balanced" if use_balanced else None
     max_iter = trial.suggest_categorical("max_iter", [200, 500, 1000])
 
-    # -----------------------
-    # Solver와 penalty의 호환성 보정
-    # - 일부 solver는 특정 penalty를 지원하지 않음
-    # - 예: lbfgs는 elasticnet 불가 -> penalty를 l2로 강제
-    # - liblinear는 elasticnet 불가 -> l1으로 대체
-    # -----------------------
+    # solver/penalty 호환성 보정
     if solver == "lbfgs" and penalty != "l2":
         penalty_effective = "l2"
     elif solver == "liblinear" and penalty == "elasticnet":
-        penalty_effective = "l1"  # liblinear는 elasticnet 미지원이므로 안전한 대체로 l1 선택
+        penalty_effective = "l1"
     else:
         penalty_effective = penalty
 
-    # -----------------------
-    # LogisticRegression에 전달할 인자 딕셔너리 구성
-    # -----------------------
     lr_kwargs = {
         "C": C,
         "solver": solver,
@@ -115,76 +134,91 @@ def objective(trial):
         "max_iter": max_iter,
         "random_state": 42,
     }
-    # elasticnet인 경우에만 l1_ratio 전달 (다른 penalty에서는 무시)
     if penalty_effective == "elasticnet":
         lr_kwargs["l1_ratio"] = l1_ratio
 
-    # -----------------------
-    # 모델 파이프라인 구성
-    # Pipeline 순서:
-    #  1. preproc: ColumnTransformer -> 숫자/범주형 전처리 수행
-    #  2. clf: LogisticRegression -> 전처리된 데이터를 학습
-    # -----------------------
-    model = Pipeline([("preproc", preprocessor), ("clf", LogisticRegression(**lr_kwargs))])
+    # ---------- SMOTE/SMOTENC 하이퍼파라미터 ----------
+    use_smote = trial.suggest_categorical("use_smote", [True, False])
+    # use_smotenc only meaningful if there are categorical columns
+    use_smotenc = False
+    if n_cat > 0 and use_smote:
+        use_smotenc = trial.suggest_categorical("use_smotenc", [True, False])
+    # sampling strategy: float -> minority to majority ratio after sampling or 'auto'
+    sampling_ratio = trial.suggest_float("sampling_ratio", 0.5, 1.0)  # e.g., 1.0 means balance to equal
+    smote_k = trial.suggest_int("smote_k", 3, 7)
 
-    # -----------------------
-    # 교차검증(CV) 설정
-    # - StratifiedKFold: 클래스 비율을 유지하는 K-fold CV
-    # - n_splits=5: 5-겹 교차검증 (데이터를 5등분하여 5번 평가)
-    # -----------------------
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    # build sampler
+    sampler = None
+    if use_smote:
+        if use_smotenc and n_cat > 0:
+            # SMOTENC: requires categorical_features indices relative to input array
+            sampler = SMOTENC(
+                categorical_features=cat_indices_for_smotenc,
+                sampling_strategy=sampling_ratio,
+                k_neighbors=smote_k,
+                random_state=42,)
+        else:
+            sampler = SMOTE(
+                sampling_strategy=sampling_ratio,
+                k_neighbors=smote_k,
+                random_state=42,)
 
-    # scoring은 dict로 주면 cross_validate가 여러 지표를 계산합니다.
-    # 여기서는 average_precision(PR AUC)을 'avg_prec'라는 이름으로 계산하게 합니다.
+    # ---------------------------
+    # 구성: imblearn Pipeline:
+    # steps: preprocessor_for_smote -> (sampler if any) -> post_smote_transformer -> classifier
+    # Note: preprocessor_for_smote and post_smote_transformer are ColumnTransformers;
+    # imblearn Pipeline applies fit/transform sequentially and ensures sampling occurs only in fit().
+    # ---------------------------
+
+    steps = [("preproc_for_smote", preprocessor_for_smote)]
+    if sampler is not None:
+        steps.append(("sampler", sampler))
+    steps.append(("post_smote", post_smote_transformer))
+    steps.append(("clf", LogisticRegression(**lr_kwargs)))
+
+    imb_pipeline = ImbPipeline(steps)
+
+    # ---------------------------
+    # cross_validate (CV)
+    # ---------------------------
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)  # 3-fold로 빠르게 수행
     scoring = {"avg_prec": "average_precision"}
 
-    # ===== 병렬 안전 실행(핵심) =====
-    # 이유:
-    # - scikit-learn의 cross_validate에 n_jobs=-1(병렬)을 주면 내부적으로 여러 프로세스를 띄웁니다.
-    # - 동시에 NumPy/BLAS(LAPACK)/OpenMP 같은 라이브러리가 자체적으로 스레드를 사용하면
-    #   시스템 스레드가 폭주(oversubscription)하여 성능 저하 또는 오류가 발생할 수 있습니다.
-    # 해결 방법 (여기서 적용한 A 방법):
-    # 1) threadpool_limits(limits=1): BLAS/OpenMP 계열 라이브러리가 사용하는 내부 스레드 수를 1로 제한
-    # 2) parallel_backend("loky", n_jobs=-1): joblib이 loky(프로세스 기반) 백엔드를 사용해 cross_validate 병렬 실행
-    # 3) cross_validate(..., n_jobs=-1): 실제로 fold들을 병렬로 실행
-    #
-    # 이 조합은 "내부 스레드 + 외부 프로세스"의 충돌을 막아 안정적인 병렬 실행을 가능하게 합니다.
-    # (환경에 따라서는 n_jobs를 1로 줄여서 단순화하는 편이 더 안정적일 수 있음)
+    # 병렬 안전 실행: BLAS/OpenMP 내부 스레드를 1로 제한 및 loky 백엔드 사용
     with threadpool_limits(limits=1):
         with parallel_backend("loky", n_jobs=-1):
-            cv_results = cross_validate(
-                model,
-                X_train,
-                y_train,
-                cv=cv,
-                scoring=scoring,
-                n_jobs=-1,
-                error_score="raise"  # 오류 발생시 예외를 일으켜 원인을 바로 알게 함
-            )
+            try:
+                cv_results = cross_validate(
+                    imb_pipeline,
+                    X_train,
+                    y_train,
+                    cv=cv,
+                    scoring=scoring,
+                    n_jobs=-1,
+                    error_score="raise",
+                    return_train_score=False
+                )
+            except Exception as e:
+                # 예: SMOTE의 k_neighbors가 너무 큰 경우 ValueError 발생 가능
+                # 이런 trial은 실패로 간주하고 매우 낮은 점수(=0.0) 리턴하여 Optuna가 피하게 함
+                # 디버깅용으로 예외 메시지도 출력
+                print("Trial failed during cross_validate:", e)
+                return 0.0
 
-    # cross_validate의 반환값은 dict이고, "test_avg_prec" 키에 각 fold의 점수가 들어있습니다.
-    avg_prec_mean = np.mean(cv_results["test_avg_prec"])
-
-    # Optuna는 objective가 반환한 수치를 기준으로 탐색합니다.
-    # study = optuna.create_study(direction='maximize') 로 만들었기 때문에
-    # 이 값이 클수록 좋은 하이퍼파라미터로 간주됩니다.
+    avg_prec_mean = float(np.mean(cv_results["test_avg_prec"]))
+    # Optuna는 maximize 하도록 study 설정할 것
     return avg_prec_mean
 
 # ---------------------------
-# Optuna 스터디 생성 및 실행
+# Optuna 스터디 실행 (빠르게 설정)
 # ---------------------------
-# create_study: 최적화 목표(direction)를 'maximize'로 설정(여기서는 PR AUC 최대화)
 study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
-
-# 몇 번의 trial(시도)을 수행할지 설정
-N_TRIALS = 60
+N_TRIALS = 20  # 빠른 실행을 위해 기본 20 (필요하면 늘리세요)
 print(f"Start optimization with {N_TRIALS} trials...")
-
-# study.optimize로 objective를 반복 실행. show_progress_bar=True는 진행바 표시.
 study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
 
 # ---------------------------
-# 최적 결과 출력
+# 결과 출력
 # ---------------------------
 print("Best trial:")
 trial = study.best_trial
@@ -194,10 +228,11 @@ for k, v in trial.params.items():
     print(f"    {k}: {v}")
 
 # ---------------------------
-# 베스트 파라미터로 모델 재학습 (동일한 호환성 보정 적용)
+# 베스트 파라미터로 최종 학습 (전체 train 사용)
 # ---------------------------
-# study.best_trial.params로 얻은 하이퍼파라미터를 가져와 동일한 보정 규칙을 다시 적용합니다.
 best_params = trial.params
+
+# 모델 하이퍼파라미터 재구성(동일 보정 적용)
 solver = best_params.get("solver")
 penalty = best_params.get("penalty")
 C = best_params.get("C")
@@ -212,73 +247,82 @@ elif solver == "liblinear" and penalty == "elasticnet":
 else:
     penalty_effective = penalty
 
-lr_kwargs = {
+lr_kwargs_final = {
     "C": C,
     "solver": solver,
     "penalty": penalty_effective,
     "class_weight": class_weight,
     "max_iter": max_iter,
-    "random_state": 42
+    "random_state": 42,
 }
 if penalty_effective == "elasticnet" and l1_ratio is not None:
-    lr_kwargs["l1_ratio"] = l1_ratio
+    lr_kwargs_final["l1_ratio"] = l1_ratio
 
-# 최종 파이프라인 구성 (전처리 + 로지스틱 회귀)
-best_model = Pipeline([("preproc", preprocessor), ("clf", LogisticRegression(**lr_kwargs))])
+# SMOTE/SMOTENC 선택 재구성
+use_smote_final = best_params.get("use_smote", False)
+use_smotenc_final = best_params.get("use_smotenc", False) if n_cat > 0 else False
+sampling_ratio_final = best_params.get("sampling_ratio", 1.0)
+smote_k_final = best_params.get("smote_k", 5)
 
-# ---------------------------
+sampler_final = None
+if use_smote_final:
+    if use_smotenc_final and n_cat > 0:
+        sampler_final = SMOTENC(
+            categorical_features=cat_indices_for_smotenc,
+            sampling_strategy=sampling_ratio_final,
+            k_neighbors=smote_k_final,
+            random_state=42,
+        )
+    else:
+        sampler_final = SMOTE(
+            sampling_strategy=sampling_ratio_final,
+            k_neighbors=smote_k_final,
+            random_state=42,
+        )
+
+# Pipeline 재구성 (train 전체 데이터에 fit)
+steps_final = [("preproc_for_smote", preprocessor_for_smote)]
+if sampler_final is not None:
+    steps_final.append(("sampler", sampler_final))
+steps_final.append(("post_smote", post_smote_transformer))
+steps_final.append(("clf", LogisticRegression(**lr_kwargs_final)))
+
+final_pipeline = ImbPipeline(steps_final)
+
 # 안전한 학습: BLAS 스레드 제한 적용
-# ---------------------------
-# 위에서와 동일한 이유로, 학습(특히 내부 BLAS를 사용하는 경우)에 앞서 스레드 수를 제한합니다.
 with threadpool_limits(limits=1):
-    best_model.fit(X_train, y_train)
+    final_pipeline.fit(X_train, y_train)
 
 # ---------------------------
-# 예측 및 점수 계산
+# 예측 및 성능 평가
 # ---------------------------
-# predict: 최종 클래스(0/1)를 반환
-y_pred = best_model.predict(X_test)
+y_pred = final_pipeline.predict(X_test)
 
-# predict_proba: 클래스일 확률을 반환 (양성 클래스에 대한 확률을 y_score로 사용)
-# 모든 분류기가 predict_proba를 제공하는 것은 아니기 때문에 hasattr로 확인합니다.
-if hasattr(best_model, "predict_proba"):
-    y_score = best_model.predict_proba(X_test)[:, 1]
-else:
-    # 일부 선형 분류기는 decision_function을 제공함 -> 점수로 사용 가능
+# predict_proba는 pipeline의 마지막 추정기가 제공하면 사용
+try:
+    y_score = final_pipeline.predict_proba(X_test)[:, 1]
+except Exception:
+    # probability 미지원 시 decision_function 사용 시도
     try:
-        y_score = best_model.decision_function(X_test)
+        y_score = final_pipeline.decision_function(X_test)
     except Exception:
-        # 그 외의 경우는 y_pred를 점수로 사용(비추천, 최후의 수단)
-        y_score = y_pred
+        y_score = y_pred.astype(float)
 
-# ---------------------------
-# 규칙 기반 오버라이드 (특별 처리)
-# ---------------------------
-# 스크립트 원문에 있던 규칙: emergency_stop 결측이면 무조건 불량으로 판정
-# (전처리 단계에서 제거했을 수 있으니 존재 여부를 먼저 확인)
+# emergency_stop 규칙(있다면)
 if "emergency_stop" in X_test.columns:
     mask = X_test["emergency_stop"].isna()
     if mask.any():
-        # 예측값을 복사하여 해당 인덱스를 1(불량)로 강제 설정
         y_pred = y_pred.copy()
         y_pred[mask] = 1
-        # 확률/점수도 1로 설정하여 메트릭 계산에 반영
         if isinstance(y_score, np.ndarray):
             y_score[mask] = 1.0
 
-# ---------------------------
-# 성능 지표 계산 및 출력
-# ---------------------------
-# ROC AUC: 수신자 조작 특성 곡선 아래 면적(범위 0~1, 클수록 좋음)
 roc_auc = roc_auc_score(y_test, y_score)
-# PR AUC(average precision): 정밀도-재현율 곡선 아래 면적, 불균형 데이터에서 유용
 pr_auc = average_precision_score(y_test, y_score)
-# F1: 정밀도와 재현율의 조화평균 (균형 지표)
 f1 = f1_score(y_test, y_pred)
-# Recall: 실제 양성 중 예측 양성 비율(불량을 놓치지 않는 능력)
 recall = recall_score(y_test, y_pred)
 
-print("\n===== Final metrics on test set (best model) =====")
+print("\n===== Final metrics on test set (best model with SMOTENC/SMOTE) =====")
 print(f"ROC AUC : {roc_auc:.4f}")
 print(f"PR AUC  : {pr_auc:.4f} (average precision)")
 print(f"F1      : {f1:.4f}")
@@ -290,9 +334,7 @@ print("Confusion matrix:\n", confusion_matrix(y_test, y_pred))
 # ---------------------------
 # ROC & PR 곡선 시각화
 # ---------------------------
-# ROC curve: FPR(False Positive Rate) vs TPR(True Positive Rate)
 fpr, tpr, _ = roc_curve(y_test, y_score)
-# Precision-Recall curve
 precision, recall_vals, _ = precision_recall_curve(y_test, y_score)
 
 plt.figure(figsize=(11, 5))
