@@ -75,7 +75,6 @@ preprocessor_for_smote = ColumnTransformer(
     remainder="drop"
 )
 
-
 n_num = len(numeric_cols)
 n_cat = len(categorical_cols)
 cat_indices_for_smotenc = list(range(n_num, n_num + n_cat)) if n_cat > 0 else []

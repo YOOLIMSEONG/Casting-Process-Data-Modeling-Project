@@ -1,7 +1,4 @@
 import pandas as pd
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 
@@ -20,13 +17,22 @@ df.info()
 df.columns
 df.isna().sum()
 
-# 데이터 
-train_df, test_df = train_test_split(df, test_size=0.2, stratify=df["passorfail"], random_state=42)
+# 데이터 분할
+n = len(df)
+split_idx = int(n * 0.8)
+
+train_df = df.iloc[:split_idx].copy()
+test_df  = df.iloc[split_idx:].copy()
+
+train_df = train_df.reset_index(drop=True)
+test_df  = test_df.reset_index(drop=True)
 
 # ==================================================================================================
 # 범주형으로 처리할 컬럼
 # ==================================================================================================
 train_df["mold_code"] = train_df["mold_code"].astype('object')
+
+test_df["mold_code"] = test_df["mold_code"].astype('object')
 
 
 # ==================================================================================================
@@ -34,9 +40,13 @@ train_df["mold_code"] = train_df["mold_code"].astype('object')
 # ==================================================================================================
 train_df = train_df.rename(columns={'date': '__tmp_swap__'})
 train_df = train_df.rename(columns={'time': 'date', '__tmp_swap__': 'time'})
-
 train_df["date"] = pd.to_datetime(train_df["date"], format="%Y-%m-%d")
 train_df["time"] = pd.to_datetime(train_df["time"], format="%H:%M:%S")
+
+test_df = test_df.rename(columns={'date': '__tmp_swap__'})
+test_df = test_df.rename(columns={'time': 'date', '__tmp_swap__': 'time'})
+test_df["date"] = pd.to_datetime(test_df["date"], format="%Y-%m-%d")
+test_df["time"] = pd.to_datetime(test_df["time"], format="%H:%M:%S")
 
 
 # ==================================================================================================
@@ -45,31 +55,32 @@ train_df["time"] = pd.to_datetime(train_df["time"], format="%H:%M:%S")
 train_df["hour"] = train_df["time"].dt.hour
 train_df["weekday"] = train_df["date"].dt.weekday
 
+test_df["hour"] = test_df["time"].dt.hour
+test_df["weekday"] = test_df["date"].dt.weekday
+
+
 # ==================================================================================================
 # 대부분이 결측치인 행 확인 및 제거
 # 해당 행이 유일한 emergency_stop 결측행이여서 이 행이 긴급중단을 나타내는 행이라고 판단
 # 모델 예측 끝난 후에 ‘emergency_stop’이 결측인 경우 무조건 불량이라고 판정 내도록 만들기
 # ==================================================================================================
-train_df.iloc[19327, :]
-mold_code_19327 = train_df.loc[19327, "mold_code"]
-time_19327 = train_df.loc[19327, "time"]
-train_df.loc[(train_df["mold_code"] == mold_code_19327) & (train_df["time"] == time_19327) & (train_df["id"] > 19273), :]
-train_df.drop(19327, inplace=True)
+train_df[train_df["emergency_stop"].isna()]
+train_df.drop(train_df[train_df["emergency_stop"].isna()].index, inplace=True)
+
 
 # ==================================================================================================
 # 단일값 컬럼 및 불필요한 컬럼 제거
 # ==================================================================================================
 # ID 컬럼 제거
 train_df.drop(columns=["id"], inplace=True)
+test_df.drop(columns=["id"], inplace=True)
 # 단일값 컬럼 제거
-train_df["line"].unique()
-train_df["name"].unique()
-train_df["mold_name"].unique()
 train_df.drop(columns=["line", "name", "mold_name"])
-# nan값이 한개의 행인 emergency_stop 컬럼 제거 
-train_df.drop(columns=["emergency_stop"], inplace=True)
+test_df.drop(columns=["line", "name", "mold_name"])
 # 중복 컬럼 제거
 train_df.drop(columns=["registration_time"], inplace=True)
+test_df.drop(columns=["registration_time"], inplace=True)
+
 
 # ==================================================================================================
 # 데이터가 겹치는 행 제거
@@ -129,6 +140,13 @@ train_df['molten_temp_filled'] = (
 train_df.drop(columns=["molten_temp"], inplace=True)
 train_df = train_df.rename(columns={'molten_temp_filled': 'molten_temp'})
 
+# 테스트 데이터에도 동일한 처리 적용
+test_df['molten_temp_filled'] = test_df['molten_temp']
+
+test_df['molten_temp_filled'] = (
+    test_df.groupby('mold_code')['molten_temp_filled'].transform(lambda x: x.interpolate(method='ffill'))
+)
+
 # ==================================================================================================
 # 컬럼 제거 (upper_mold_temp3)
 # 결측치 총 312개, 이상치(1449.0) 64356개로 정보값 매우 왜곡
@@ -136,12 +154,14 @@ train_df = train_df.rename(columns={'molten_temp_filled': 'molten_temp'})
 # 이상치가 1449.0으로 고정이라서 센서가 고장났을 경우 1449라는 코드를 내보내는 것으로 가정하고 upper_mold_temp3 열을 제거하기로 함
 # ==================================================================================================
 train_df.drop(columns=["upper_mold_temp3"], inplace=True)
+test_df.drop(columns=["upper_mold_temp3"], inplace=True)
 
 # ==================================================================================================
 # 컬럼 제거 (lower_mold_temp3)
 # 이상치(1449.0) 71651개, 결측치 312개로 upper_mold_temp3와 마찬가지로 제거하기로 함
 # ==================================================================================================
 train_df.drop(columns=["lower_mold_temp3"], inplace=True)
+test_df.drop(columns=["lower_mold_temp3"], inplace=True)
 
 # ==================================================================================================
 # 컬럼 제거 (heating_furnace)
@@ -149,11 +169,13 @@ train_df.drop(columns=["lower_mold_temp3"], inplace=True)
 # 일단은 제외 (3개 이상의 종류이지만 구분이 어려움, 결과에 큰 영향을 미치지 않을 것이라 판단)
 # ==================================================================================================
 train_df.drop(columns=["heating_furnace"], inplace=True)
+test_df.drop(columns=["heating_furnace"], inplace=True)
 
 # ==================================================================================================
 # 컬럼 제거 (molten_volume)
 # ==================================================================================================
 train_df.drop(columns=["molten_volume"], inplace=True)
+test_df.drop(columns=["molten_volume"], inplace=True)
 
 # ==================================================================================================
 # 이상치 제거 (upper_mold_temp2)
@@ -169,7 +191,9 @@ train_df.drop(42632,inplace=True)
 # 모델 예측 끝난 후에 ‘tryshot_signal’이 D인 경우 무조건 불량이라고 판정 내도록 만들기
 # ==================================================================================================
 train_df = train_df[~(train_df["tryshot_signal"] == 'D')]
-train_df.drop(columns=["tryshot_signal"], inplace=True)
+
+train_df["tryshot_signal"].fillna('N', inplace=True)
+test_df["tryshot_signal"].fillna('N', inplace=True)
 
 train_df.to_csv(OUTPUT_FILE_TRAIN)
 test_df.to_csv(OUTPUT_FILE_TEST)
