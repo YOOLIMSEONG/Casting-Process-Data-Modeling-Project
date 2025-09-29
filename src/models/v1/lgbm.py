@@ -6,10 +6,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     f1_score, accuracy_score, precision_score, recall_score, roc_auc_score, confusion_matrix
 )
-from lightgbm import LGBMClassifier, plot_importance
+from lightgbm import LGBMClassifier
 import optuna
 import matplotlib.pyplot as plt
 import seaborn as sns
+from imblearn.over_sampling import SMOTE
+from sklearn.inspection import permutation_importance
 
 # =====================================
 # 0. 데이터 로드
@@ -27,7 +29,6 @@ test_df.info()
 # =====================================
 # 1. 데이터 준비
 # =====================================
-
 feature_cols = [
     "count", "facility_operation_cycleTime", "production_cycletime",
     "low_section_speed", "high_section_speed", "cast_pressure",
@@ -45,17 +46,17 @@ X_train_full, X_valid, y_train_full, y_valid = train_test_split(
     X, y, test_size=0.2, stratify=y, random_state=42
 )
 
+# SMOTE 적용 (훈련 데이터에만)
+smote = SMOTE(random_state=42)
+X_train_res, y_train_res = smote.fit_resample(X_train_full, y_train_full)
+
 # 표준화
 scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train_full)
+X_train_scaled = scaler.fit_transform(X_train_res)
 X_valid_scaled = scaler.transform(X_valid)
 
 # 새 테스트셋
 X_test_scaled = scaler.transform(test_df[feature_cols])
-
-# 클래스 불균형 보정
-scale_pos_weight = (len(y_train_full) - sum(y_train_full)) / sum(y_train_full)
-print(f"Scale_pos_weight: {scale_pos_weight:.2f}")
 
 # =====================================
 # 2. Optuna 목적 함수 정의
@@ -74,22 +75,21 @@ def objective(trial):
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-        "scale_pos_weight": scale_pos_weight
     }
 
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    preds = []
-    trues = []
+    preds, trues = [], []
 
-    for train_idx, valid_idx in skf.split(X_train_scaled, y_train_full):
-        X_train, X_val_fold = X_train_scaled[train_idx], X_train_scaled[valid_idx]
-        y_train, y_val_fold = y_train_full.iloc[train_idx], y_train_full.iloc[valid_idx]
+    for train_idx, valid_idx in skf.split(X_train_scaled, y_train_res):
+        X_train_fold, X_val_fold = X_train_scaled[train_idx], X_train_scaled[valid_idx]
+        y_train_fold, y_val_fold = y_train_res.iloc[train_idx], y_train_res.iloc[valid_idx]
 
         model = LGBMClassifier(**params)
         model.fit(
-            X_train, y_train,
+            X_train_fold, y_train_fold,
             eval_set=[(X_val_fold, y_val_fold)],
-            eval_metric="binary_logloss"
+            eval_metric="binary_logloss",
+            verbose=-1
         )
 
         y_pred_prob = model.predict_proba(X_val_fold)[:, 1]
@@ -118,14 +118,14 @@ print("Best trial parameters:", study.best_trial.params)
 # =====================================
 best_params = study.best_trial.params
 final_model = LGBMClassifier(**best_params)
-final_model.fit(X_train_scaled, y_train_full)
+final_model.fit(X_train_scaled, y_train_res)
 
 # =====================================
 # 5. 최적 threshold 계산 (Train 기준)
 # =====================================
 y_train_prob = final_model.predict_proba(X_train_scaled)[:, 1]
 thresholds = np.arange(0.1, 0.9, 0.01)
-scores = [f1_score(y_train_full, y_train_prob > t) for t in thresholds]
+scores = [f1_score(y_train_res, y_train_prob > t) for t in thresholds]
 best_thresh = thresholds[np.argmax(scores)]
 print("Optimal threshold (Train):", best_thresh)
 
@@ -134,14 +134,10 @@ print("Optimal threshold (Train):", best_thresh)
 # =====================================
 y_test_prob = final_model.predict_proba(X_test_scaled)[:, 1]
 y_test_pred = (y_test_prob > best_thresh).astype(int)
-y_test_pred = y
 
-# 테스트 데이터에 실제 레이블이 있다면 y_test를 사용
-# 없으면 혼동 행렬은 예측값만으로는 만들 수 없음
-# 여기서는 예를 들어 test_df에 'passorfail' 컬럼이 있다고 가정
 if "passorfail" in test_df.columns:
     y_test_true = test_df["passorfail"].astype(int)
-    
+
     tn, fp, fn, tp = confusion_matrix(y_test_true, y_test_pred).ravel()
     accuracy = accuracy_score(y_test_true, y_test_pred)
     f1 = f1_score(y_test_true, y_test_pred)
@@ -162,7 +158,7 @@ else:
     print("Test dataset에 실제 레이블(passorfail)이 없어 성능 평가는 생략됩니다.")
 
 # =====================================
-# 9. 테스트 혼동 행렬 시각화
+# 7. 테스트 혼동 행렬 시각화
 # =====================================
 if "passorfail" in test_df.columns:
     cm = confusion_matrix(y_test_true, y_test_pred)
@@ -189,15 +185,10 @@ plt.barh(feat_imp["feature"][:20][::-1], feat_imp["importance"][:20][::-1])
 plt.title("Top 20 Feature Importances")
 plt.show()
 
-
-from sklearn.inspection import permutation_importance
-
 # =====================================
-# Permutation Importance 계산 (Test 데이터)
+# 9. Permutation Importance (Test 데이터)
 # =====================================
 if "passorfail" in test_df.columns:
-    y_test_true = test_df["passorfail"].astype(int)
-
     perm_importance = permutation_importance(
         final_model, X_test_scaled, y_test_true,
         n_repeats=10, random_state=42, scoring='f1'
@@ -209,7 +200,6 @@ if "passorfail" in test_df.columns:
         "importance_std": perm_importance.importances_std
     }).sort_values(by="importance_mean", ascending=False)
 
-    # 시각화
     plt.figure(figsize=(10,6))
     plt.barh(
         perm_feat_imp["feature"][:20][::-1],
@@ -221,5 +211,3 @@ if "passorfail" in test_df.columns:
     plt.show()
 else:
     print("Test dataset에 실제 레이블(passorfail)이 없어 Permutation Importance를 계산할 수 없습니다.")
-
-
