@@ -75,8 +75,8 @@ train_df.drop(train_df[train_df["emergency_stop"].isna()].index, inplace=True)
 train_df.drop(columns=["id"], inplace=True)
 test_df.drop(columns=["id"], inplace=True)
 # 단일값 컬럼 제거
-train_df.drop(columns=["line", "name", "mold_name"])
-test_df.drop(columns=["line", "name", "mold_name"])
+train_df.drop(columns=["line", "name", "mold_name"], inplace=True)
+test_df.drop(columns=["line", "name", "mold_name"], inplace=True)
 # 중복 컬럼 제거
 train_df.drop(columns=["registration_time"], inplace=True)
 test_df.drop(columns=["registration_time"], inplace=True)
