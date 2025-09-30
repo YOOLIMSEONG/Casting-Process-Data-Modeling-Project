@@ -20,6 +20,7 @@ df = df_raw.copy()
 df['tryshot_signal'].fillna('N', inplace=True)
 df = df.rename(columns={'date': '__tmp_swap__'})
 df = df.rename(columns={'time': 'date', '__tmp_swap__': 'time'})
+
 df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d")
 df["time"] = pd.to_datetime(df["time"], format="%H:%M:%S")
 df['registration_time'] = pd.to_datetime(df['registration_time'])
@@ -122,11 +123,6 @@ train_df["physical_strength"] = (
 
 # test 데이터 처리
 # 세그먼트 분할 함수(구간 요조정)
-def add_segment(g, time_col="registration_time", gap_minutes=30):
-    g = g.sort_values(time_col).copy()
-    dt = g[time_col].diff().dt.total_seconds().div(60)
-    g["__seg__"] = (dt.isna() | (dt > gap_minutes)).cumsum()
-    return g
 out = []
 for _, g0 in test_df.groupby("mold_code", dropna=False):
     g1 = add_segment(g0, "registration_time", gap_minutes=30)
@@ -194,10 +190,10 @@ train_df['P_diff'] = train_df['physical_strength'] - train_df['cast_pressure']
 train_df['Cycle_diff'] = train_df['production_cycletime'] - train_df['facility_operation_cycleTime']
 
 # test
-train_df["uniformity"] =train_df[upper_cols + lower_cols].std(axis=1)
-train_df["mold_temp_udiff"] =train_df[upper_cols].mean(axis=1) - train_df[lower_cols].mean(axis=1)
-train_df['P_diff'] = train_df['physical_strength'] - train_df['cast_pressure']
-train_df['Cycle_diff'] = train_df['production_cycletime'] - train_df['facility_operation_cycleTime']
+test_df["uniformity"] =test_df[upper_cols + lower_cols].std(axis=1)
+test_df["mold_temp_udiff"] =test_df[upper_cols].mean(axis=1) - test_df[lower_cols].mean(axis=1)
+test_df['P_diff'] = test_df['physical_strength'] - test_df['cast_pressure']
+test_df['Cycle_diff'] = test_df['production_cycletime'] - test_df['facility_operation_cycleTime']
 # %%
 # ==================================================================================================
 # 컬럼 제거 (heating_furnace)
