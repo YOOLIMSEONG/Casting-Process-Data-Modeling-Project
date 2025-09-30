@@ -32,10 +32,10 @@ N_JOBS = max(1, CPU_COUNT - 1)
 # 파일 경로
 # ---------------------------
 BASE_DIR = Path(__file__).resolve().parents[3]
-DATA_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v1.csv"
-DATA_FILE_TEST = BASE_DIR / "data" / "processed" / "test_v1.csv"
-RF_MODEL_OUTPUT = BASE_DIR / "data" / "models" / "v1" / "RandomForest_v1.pkl"
-RF_SCORE_OUTPUT = BASE_DIR / "data" / "models" / "v1" / "RandomForest_v1_scores.csv"
+DATA_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v2.csv"
+DATA_FILE_TEST = BASE_DIR / "data" / "processed" / "test_v2.csv"
+RF_MODEL_OUTPUT = BASE_DIR / "data" / "models" / "v2" / "RandomForest_v2.pkl"
+RF_SCORE_OUTPUT = BASE_DIR / "data" / "models" / "v2" / "RandomForest_v2_scores.csv"
 
 
 # ---------------------------

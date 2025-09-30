@@ -1,4 +1,4 @@
-# rf_smotenc_f1_opt.py (Optuna objective: maximize F1 via threshold search on validation using RandomForest)
+# xgb_smotenc_f1_opt.py
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -16,7 +16,7 @@ import joblib
 import multiprocessing
 import matplotlib.pyplot as plt
 from statistics import median
-from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 
 # ---------------------------
 # 설정
@@ -32,10 +32,10 @@ N_JOBS = max(1, CPU_COUNT - 1)
 # 파일 경로
 # ---------------------------
 BASE_DIR = Path(__file__).resolve().parents[3]
-DATA_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v1.csv"
-DATA_FILE_TEST = BASE_DIR / "data" / "processed" / "test_v1.csv"
-RF_MODEL_OUTPUT = BASE_DIR / "data" / "models" / "v1" / "RandomForest_v1.pkl"
-RF_SCORE_OUTPUT = BASE_DIR / "data" / "models" / "v1" / "RandomForest_v1_scores.csv"
+DATA_FILE_TRAIN = BASE_DIR / "data" / "processed" / "train_v2.csv"
+DATA_FILE_TEST = BASE_DIR / "data" / "processed" / "test_v2.csv"
+MODEL_OUTPUT = BASE_DIR / "data" / "models" / "v2" / "XGBoost_v2.pkl"
+SCORE_OUTPUT = BASE_DIR / "data" / "models" / "v2" / "XGBoost_v2_scores.csv"
 
 
 # ---------------------------
@@ -44,9 +44,8 @@ RF_SCORE_OUTPUT = BASE_DIR / "data" / "models" / "v1" / "RandomForest_v1_scores.
 train_df = pd.read_csv(DATA_FILE_TRAIN)
 test_df = pd.read_csv(DATA_FILE_TEST)
 
-drop_cols = [c for c in ["date", "time", "Unnamed: 0"] if c in train_df.columns]
-train_df.drop(columns=drop_cols, inplace=True, errors='ignore')
-test_df.drop(columns=drop_cols, inplace=True, errors='ignore')
+train_df.drop(columns=["date", "time", "Unnamed: 0"], inplace=True, errors='ignore')
+test_df.drop(columns=["date", "time", "Unnamed: 0"], inplace=True, errors='ignore')
 
 target_col = "passorfail"
 
@@ -56,11 +55,10 @@ X_train = train_df.drop(columns=[target_col]).copy()
 y_test = test_df[target_col].astype(int).copy()
 X_test = test_df.drop(columns=[target_col]).copy()
 
+# 수치형/범주형 컬럼 분리
 numeric_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
 cat_cols = X_train.select_dtypes(exclude=[np.number]).columns.tolist()
 
-print("Train shape:", X_train.shape, "Positive count:", int(y_train.sum()))
-print("Numeric cols:", len(numeric_cols), "Categorical cols:", len(cat_cols))
 
 # ---------------------------
 # 유틸 함수
@@ -102,18 +100,23 @@ def find_best_threshold_for_f1(y_true, y_scores):
 # Optuna objective
 # ---------------------------
 def objective(trial):
-    # RandomForest 하이퍼파라미터
-    rf_params = {
+    # XGBoost 하이퍼파라미터
+    params = {
         "n_estimators": trial.suggest_int("n_estimators", 100, 1000),
-        "max_depth": trial.suggest_int("max_depth", 3, 30) if trial.suggest_categorical("use_max_depth", [True, False]) else None,
-        "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
-        "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 20),
-        "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", 0.25, 0.5, 0.75]),
-        "bootstrap": trial.suggest_categorical("bootstrap", [True, False]),
-        "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
-        "random_state": RANDOM_STATE,
+        "max_depth": trial.suggest_int("max_depth", 3, 15),
+        "learning_rate": trial.suggest_loguniform("learning_rate", 1e-3, 0.3),
+        "subsample": trial.suggest_uniform("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_uniform("colsample_bytree", 0.5, 1.0),
+        "gamma": trial.suggest_loguniform("gamma", 1e-8, 10.0),
+        "reg_alpha": trial.suggest_loguniform("reg_alpha", 1e-8, 10.0),
+        "reg_lambda": trial.suggest_loguniform("reg_lambda", 1e-8, 10.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+        "use_label_encoder": False,
+        "objective": "binary:logistic",
         "n_jobs": N_JOBS,
-    }
+        "random_state": RANDOM_STATE,
+        "verbosity": 0,
+        }
 
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     fold_f1s = []
@@ -129,7 +132,7 @@ def objective(trial):
         X_tr_cat_ord = ord_enc.fit_transform(X_tr[cat_cols]).astype(int)
         X_val_cat_ord = ord_enc.transform(X_val[cat_cols]).astype(int)
         
-        # Standard scaling (RF는 tree 기반이라 필수는 아니지만 동일 조건 유지)
+        # Standard scaling (tree 계열이지만 동일 조건 유지)
         scaler = StandardScaler()
         X_tr_num_scaled = scaler.fit_transform(X_tr[numeric_cols])
         X_val_num_scaled = scaler.transform(X_val[numeric_cols])
@@ -144,8 +147,6 @@ def objective(trial):
         X_res_num = X_res[:, :len(numeric_cols)]
         
         X_res_cat_ord = X_res[:, len(numeric_cols):].astype(int)
-        
-        # OneHot encoding
         ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
         ohe.fit(X_tr_cat_ord)  # fit on ordinal-coded original train
         X_res_cat_ohe = ohe.transform(X_res_cat_ord)
@@ -154,15 +155,29 @@ def objective(trial):
         X_res_final = np.hstack([X_res_num, X_res_cat_ohe]) if (X_res_num.size or X_res_cat_ohe.size) else np.zeros((len(y_res), 0))
         X_val_final = np.hstack([X_val_num_scaled, X_val_cat_ohe]) if (X_val_num_scaled.size or X_val_cat_ohe.size) else np.zeros((len(X_val), 0))
 
-        # RandomForest training
-        clf = RandomForestClassifier(**rf_params)
+        # XGBoost 학습
+        clf = XGBClassifier(
+            n_estimators=int(params["n_estimators"]),
+            max_depth=int(params["max_depth"]),
+            learning_rate=float(params["learning_rate"]),
+            subsample=float(params["subsample"]),
+            colsample_bytree=float(params["colsample_bytree"]),
+            gamma=float(params["gamma"]),
+            reg_alpha=float(params["reg_alpha"]),
+            reg_lambda=float(params["reg_lambda"]),
+            min_child_weight=int(params["min_child_weight"]),
+            use_label_encoder=False,
+            objective="binary:logistic",
+            n_jobs=N_JOBS,
+            random_state=RANDOM_STATE,
+            verbosity=0,
+        )
         clf.fit(X_res_final, y_res)
 
-        # predict probabilities on validation (class 1)
+        # 적합
         if hasattr(clf, "predict_proba"):
             val_probs = clf.predict_proba(X_val_final)[:, 1]
         else:
-            # very unlikely for RF, but keep fallback
             val_probs = clf.predict(X_val_final).astype(float)
 
         # F1을 기준으로 최적 임계값 탐색
@@ -177,7 +192,7 @@ def objective(trial):
 # Optuna study
 # ---------------------------
 sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
-study = optuna.create_study(direction="maximize", sampler=sampler, study_name="rf_f1")
+study = optuna.create_study(direction="maximize", sampler=sampler, study_name="xgb_f1")
 study.optimize(objective, n_trials=N_TRIALS, n_jobs=1, show_progress_bar=True)
 
 # ---------------------------
@@ -185,16 +200,21 @@ study.optimize(objective, n_trials=N_TRIALS, n_jobs=1, show_progress_bar=True)
 # ---------------------------
 best_params = study.best_trial.params
 
-final_rf_params = {
+final_xgb_params = {
     "n_estimators": int(best_params["n_estimators"]),
-    "max_depth": int(best_params["max_depth"]) if best_params.get("use_max_depth", False) and best_params.get("max_depth") is not None else None,
-    "min_samples_split": int(best_params["min_samples_split"]),
-    "min_samples_leaf": int(best_params["min_samples_leaf"]),
-    "max_features": best_params["max_features"],
-    "bootstrap": bool(best_params["bootstrap"]),
-    "criterion": best_params["criterion"],
-    "random_state": RANDOM_STATE,
+    "max_depth": int(best_params["max_depth"]),
+    "learning_rate": float(best_params["learning_rate"]),
+    "subsample": float(best_params["subsample"]),
+    "colsample_bytree": float(best_params["colsample_bytree"]),
+    "gamma": float(best_params["gamma"]),
+    "reg_alpha": float(best_params["reg_alpha"]),
+    "reg_lambda": float(best_params["reg_lambda"]),
+    "min_child_weight": int(best_params["min_child_weight"]),
+    "use_label_encoder": False,
+    "objective": "binary:logistic",
     "n_jobs": N_JOBS,
+    "random_state": RANDOM_STATE,
+    "verbosity": 0,
 }
 
 skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
@@ -209,6 +229,8 @@ for tr_idx, val_idx in skf.split(X_train, y_train):
     y_tr = y_train.iloc[tr_idx].copy()
     y_val = y_train.iloc[val_idx].copy()
 
+    # ordinal + scaling
+
     ord_enc_cv = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
     X_tr_cat_ord = ord_enc_cv.fit_transform(X_tr[cat_cols]).astype(int)
     X_val_cat_ord = ord_enc_cv.transform(X_val[cat_cols]).astype(int)
@@ -217,9 +239,8 @@ for tr_idx, val_idx in skf.split(X_train, y_train):
     X_tr_num_scaled = scaler_cv.fit_transform(X_tr[numeric_cols])
     X_val_num_scaled = scaler_cv.transform(X_val[numeric_cols])
     
-    # SMOTE
+    # SMOTENC
     X_tr_for_smote = np.hstack([X_tr_num_scaled, X_tr_cat_ord]) if (X_tr_num_scaled.size or X_tr_cat_ord.size) else np.empty((len(X_tr), 0))
-    
     cat_feature_indices = list(range(len(numeric_cols), len(numeric_cols) + len(cat_cols)))
     sm_cv = SMOTENC(categorical_features=cat_feature_indices, random_state=RANDOM_STATE)
     X_res_cv, y_res_cv = sm_cv.fit_resample(X_tr_for_smote, y_tr.values)
@@ -236,15 +257,17 @@ for tr_idx, val_idx in skf.split(X_train, y_train):
     X_res_final_cv = np.hstack([X_res_num_cv, X_res_cat_ohe_cv]) if (X_res_num_cv.size or X_res_cat_ohe_cv.size) else np.zeros((len(y_res_cv), 0))
     X_val_final_cv = np.hstack([X_val_num_scaled, X_val_cat_ohe_cv]) if (X_val_num_scaled.size or X_val_cat_ohe_cv.size) else np.zeros((len(X_val), 0))
 
-    # 학습
-    clf_cv = RandomForestClassifier(**final_rf_params)
+    # XGBoost 학습
+    clf_cv = XGBClassifier(**final_xgb_params)
     clf_cv.fit(X_res_final_cv, y_res_cv)
 
+    # 적합
     if hasattr(clf_cv, "predict_proba"):
         val_probs_cv = clf_cv.predict_proba(X_val_final_cv)[:, 1]
     else:
         val_probs_cv = clf_cv.predict(X_val_final_cv).astype(float)
 
+    # F1을 기준으로 최적 임계값 탐색
     thr_cv, f1_cv, prec_cv, rec_cv = find_best_threshold_for_f1(y_val, val_probs_cv)
 
     fold_thresholds.append(thr_cv)
@@ -293,9 +316,9 @@ X_res_final_full = np.hstack([X_res_num_full, X_res_cat_ohe_full]) if (X_res_num
 X_test_final = np.hstack([X_test_num_scaled_full, X_test_cat_ohe_full]) if (X_test_num_scaled_full.size or X_test_cat_ohe_full.size) else np.zeros((len(X_test), 0))
 
 # ---------------------------
-# 최종 RandomForest 학습
+# 최종 XGBoost 학습
 # ---------------------------
-clf_final = RandomForestClassifier(**final_rf_params)
+clf_final = XGBClassifier(**final_xgb_params)
 clf_final.fit(X_res_final_full, y_res_full)
 
 # ---------------------------
@@ -305,16 +328,16 @@ if hasattr(clf_final, "predict_proba"):
     y_test_proba = clf_final.predict_proba(X_test_final)[:, 1]
 else:
     y_test_proba = clf_final.predict(X_test_final).astype(float)
+
 y_test_pred_oper = (y_test_proba >= thr_oper).astype(int)
 
 # tryshot_signal이 D인 경우 무조건 1로 예측
 X_test_with_pred = X_test.copy()
 X_test_with_pred["pred"] = y_test_pred_oper
-
 if "tryshot_signal" in X_test_with_pred.columns:
     X_test_with_pred.loc[X_test_with_pred["tryshot_signal"] == "D", "pred"] = 1
-
 y_test_pred_oper = X_test_with_pred["pred"].values
+
 
 # ---------------------------
 # 테스트 평가
@@ -327,7 +350,7 @@ test_rec = recall_score(y_test, y_test_pred_oper, zero_division=0)
 test_f1 = f1_score(y_test, y_test_pred_oper, zero_division=0)
 cm = confusion_matrix(y_test, y_test_pred_oper)
 
-print("\n== Test set performance at operating threshold (RandomForest) ==")
+print("\n== Test set performance at operating threshold (XGBoost) ==")
 print(f"Operating threshold: {thr_oper:.6f}")
 print(f"PR-AUC: {test_pr_auc:.4f}")
 print(f"ROC-AUC: {test_roc_auc:.4f}")
@@ -346,7 +369,7 @@ artifact_obj = {
     "best_params": study.best_trial.params,
     "operating_threshold": thr_oper
 }
-joblib.dump(artifact_obj, RF_MODEL_OUTPUT, compress=3)
+joblib.dump(artifact_obj, MODEL_OUTPUT, compress=3)
 
 # ---------------------------
 # 점수 저장 (CSV)
@@ -359,4 +382,4 @@ pd.DataFrame([{
     "recall": test_rec,
     "f1_score": test_f1,
     "operating_threshold": thr_oper
-}]).to_csv(RF_SCORE_OUTPUT, index=False)
+}]).to_csv(SCORE_OUTPUT, index=False)
